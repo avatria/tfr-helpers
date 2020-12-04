@@ -11,7 +11,7 @@ There are two main components of this repo: a set of tutorials and guides that e
 
 0. Introduction to Tensorflow features, Protocol Buffers (protobufs), and Example Lists with Context (ELWCs).
 1. Getting your data to work with TensorFlow datasets for ranking.
-2. Standing up the **key components** of the Tensorflow Ranking Estimator and Groupwise Scoring Functions.
+2. Groupwise Scoring Functions and standing up the **key components** of the Tensorflow Ranking Estimator.
 3. Exporting and importing `SavedModels`.
 4. Performance hacks.
 
@@ -28,7 +28,7 @@ Here are some links to learning resources that we found helpful for figuring out
 
 
 ## Code
-The `tfr-helpers` package provides utilities for converting your ranking datasets and pandas DataFrames into ELWCs, a rather complex data structure.
+The `tfr_helpers` package provides utilities for converting your ranking datasets and pandas DataFrames into ELWCs, a rather complex data structure.
 
 Other functionality:
 - Exporting ranker estimators to SavedModel protobuf format.
