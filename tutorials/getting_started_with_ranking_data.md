@@ -1,4 +1,4 @@
-# Introduction to TensorFlow features and protocol buffers
+# Getting started: your data and TensorFlow Ranking 
 
 If you've noticed, TensorFlow models don't exactly follow the scikit-learn API you may be used to as a python data guru with slick `.fit` and `.predict` methods that work with numpy arrays and pandas DataFrames. And since we're trying to *rank* things within a group, our data is naturally nested (items within a group). So when you're getting started with `tensorflow_ranking`, the first place to start is way before neural nets - it's with formatting your data correctly.
 
