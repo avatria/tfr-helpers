@@ -20,14 +20,16 @@ Still, even the Keras versions of TensorFlow Ranking estimators remain rather cr
 
 ### Ranking data formats
 
-Ranking is not as simple as classification and regression machine learning tasks. Those types of models generally assume *iid* datasets, i.e. sample *i* is independent of sample *j*. The same is not true in ranking datasets. Instead, we have *grouped* data. The core units of currency are typically `queries` and `documents`, but these are terms that may differ depending on your use case. Avatria has groups of `items` nested within user `queries` or `product lists` as we work with ecommerce data. Airbnb has `queries` and `listings`. The New York Times has `queries` and `articles`.
+Ranking is not as simple as classification and regression machine learning tasks. Those types of models generally assume *iid* datasets, i.e. sample *i* is independent of sample *j*. The same is not true in ranking datasets. Instead, we have *grouped* data. Specifically, we'll refer to a group of items within a query as a **query group**. Besides query groups, the smaller core units of currency are typically `queries` and `documents`, but these are terms that may differ depending on your use case. Avatria has query groups consisting of `items` nested within user `queries` (or sometimes `product lists`) as we work with ecommerce data. Airbnb has `searches` and `listings`. The New York Times has `queries` and `articles`.
 
 Google has developed its own naming system:
 
 * An **example** is an individual item being ranked. The goal of a ranking model is to sort `examples` as accurately and efficiently as possible. Each `example` has a `label`, or a relevance score, and per-`example` features. For example, the clickthrough rate of an article would be an `example` feature.
 * The **context** is the `query`, the parent structure under which multiple **examples** are housed. Each `context` can also have features. For example, a customer queries "small dog non-shedding" has four tokens for which TensorFlow Ranking can learn word embeddings.
 
-Ranking data, clearly, is nested. So the question becomes, how can we express this hierarchy to Tensorflow in a way that's fast and minimizes data duplication?
+Going forward, we'll speak like this: "One query group is comprised of a context and multiple examples."
+
+Ranking data, clearly, is nested. So the question becomes, how can we express a query group to Tensorflow in a way that's fast, flexible, and that can also allow us to store all types of features - numeric, categorical, and text-sequences?
 
 #### Ranking data
 
@@ -97,13 +99,193 @@ I cannot recommend enough you use option 2. Storing your data within ELWC protob
 
 
 ### Google protobufs
+As we have seen, the ranking objective implies requirements for our data storage that text files simply do not easily accommodate. Fortunately, Google created [protocol buffers](https://developers.google.com/protocol-buffers/docs/overview). Protocol buffers are basically a data format used for serializing structured data, kind of like how JSON is a text file representation of a Javascript object, only more rigid. We'll refer to a protocol buffer simply as a "proto". Protos were specifically designed to be easy to understand and fast, and TensorFlow is optimized to injest proto data.
+
+A proto is really just a class definition for a structured data object - Google's proto system comes with a pseudo programming language (Wikipedia refers to it as an "interface description language") for defining protos. For example, I can represent a "car" object like this:
+
+```bash
+message Car {
+	required string make = 1;
+	required string model = 2;
+	required string VIN = 3;
+	optional int32 cylinders = 4;
+	optional int32 voltage = 5;
+	repeated OptionsPackage options_packages = 6;
+}
+```
+
+So this proto definition implies a few things:
+- Cars are `required` to have exactly one `make`, `model`, and `VIN` field value.
+- Cars might have some number of cylinders (for gasoline engines), but they might be EVs or hybrids and be powered by batteries with a certain voltage. Either is `optional`.
+- Cars can have a variable (i.e. `repeated`) number of special options packages, where an `OptionsPackage` is *yet another* proto. This means that we can construct protos out of other protos. Perhaps your neighbor just bought a new BMW M5 with the Driving Assistance Plus Package and the Executive Package - then their M5 would contain two OptionsPackage protos.
+
+Here are some important facts to know about protos:
+* The numbers associated with each `field` have to be unique and contiguous.
+* `repeated` field values are also `option`, meaning that they can be repeated zero or many times.
+* Protos support providing `default` field values.
+* Different proto types can be imported from other `.proto` files.
+* There are a couple of different `proto` syntaxes, 2 and 3 are the biggest. You'll see the syntax defined at the top of the `.proto` file where different types of protos are defined.
+* Sometimes the `required` keyword is omitted - we believe this still means that the field is implicitly `required`, like in the `Result` message published on Google's developer guide:
+```bash
+message Result {
+  string url = 1;
+  string title = 2;
+  repeated string snippets = 3;
+}
+```
+
+Protos allow us to easily template a query group. We can just have one proto that represents a `context` (for example, a search phrase and timestamp at which the search was issued) and another proto type that represents an `example` (for example, a product SKU, name and price). Then we can build yet another, larger proto comprised of exactly one `context` and a list of `examples`. Why not name this proto `ExampleListWithContext`? Well, that's exactly what the creators of Tensorflow Ranking did.
+
+### ELWC protos and TF Records files
+
+What would an ELWC look like? [Here](https://github.com/tensorflow/serving/blob/master/tensorflow_serving/apis/input.proto#L72) is the official proto definition:
+```bash
+message tensorflow.Example {
+  Features features = 1;
+}
+
+message ExampleListWithContext {
+  repeated tensorflow.Example examples = 1; // individual items/documents represented as list of examples
+  tensorflow.Example context = 2; // search query respresented as single example
+}
+```
+
+We'll get into what exactly the `Features` data type is in the next section of this guide, but for now, just think of it as a group of machine learning features. So each query group will be saved as one ELWC. Each ELWC contains one query `context` Example proto where query-level features can be stored exactly once, and then any number of `example` Example protos are be stored within a list, each `example` proto containing individual item-level features. 
+
+Don't be confused between the `Example` proto and the `example` representing an individual item within the query group. The terminology is indeed confusing! But the [basic outline](https://github.com/tensorflow/serving/issues/1628) of one query group formatted as an ELWC is decently straightforward:
+
+```bash
+// one ELWC
+{
+  // context features
+  "context": {
+    "<feature_name3>": <value>|<list>
+    "<feature_name4>": <value>|<list>
+  },
+
+  // List of Example objects
+  "examples": [
+    {
+      // Example 1
+      "<feature_name1>": <value>|<list>,
+      "<feature_name2>": <value>|<list>,
+      ...
+    },
+    {
+      // Example 2
+      "<feature_name1>": <value>|<list>,
+      "<feature_name2>": <value>|<list>,
+      ...
+    }
+    ...
+  ]
+}
+```
+
+Something to notice in the JSON above, you'll see that the set of context feature names and the set of example feature names are mutually exclusive. This is not a requirement of the ELWC, but for the sake of using ELWCs to build TensorFlow Ranking estimators, we'll want separate feature names for each unique type of feature. For example, if we have a textual feature for both the context and for the examples, instead of naming those features both `text`, name one `query_text` and the other `product_text`. Eventually when we build our TFR ranker, the context and example features will be joined into a single tensor, and keeping feature names unique will be useful.
+
+Once you have the ability to script out the conversion of your query groups into ELWCs, each ELWC will be written to a [Tensorflow Records](https://medium.com/mostly-ai/tensorflow-records-what-they-are-and-how-to-use-them-c46bc4bbb564) file using the `.tfrecords` file extension, a file format for storing the serialized protobuf data. As the file format would suggest, TensorFlow is optimized to work with TF Records files. You're also free to split up a training data set into multiple `.tfrecords` files and provide TFR a filepath to all of the `.tfrecords` files you would like to use for training/validation/testing.
+
+While some may claim that "binary data takes up less space on disk," we found that the TF Records files were actually significantly larger than when the same dataset was saved in our default SVMlight format. Even still, despite the file size increase, storing our query groups as ELWC protos helped speed up training time significantly over the original approach - loading subsets of our data into `pandas.DataFrame`s and then parsing individual lines into batches of query groups. Even better, the TF Records approach is *much* more memory efficient. Instead of needing to load O(3)-O(4) Mb of training data from individual SVMlight files at a time, TFR can load individual batches of query groups on-demand, greatly reducing the training pipeline's memory footprint.
+
+
+### Tensorflow `Feature` and `Features`
+**Just a note:** while constructing our first ELWCs, you will see the word "feature" thrown around *a lot*. Just like the word "example," TensorFlow has overloaded the word "feature," only now by a factor of four or five. Just take it slow, read [this](https://github.com/tensorflow/serving/issues/1628) miraculous GitHub issue, and and use `tfr_helpers` to assist you with ELWC creation in the future.
+
+We have arrived at the most granular part of the dataset conversion/compatibility process - converting individual feature values into types that will be compatible with TensorFlow. Overall, there are four steps in building one ELWC:
+
+1. Convert feature values into the smallest proto type we'll use - `Feature` protos. For this we'll employ `tf.train.Feature`.
+2. Group together query and context `Feature` protos into groups of named features that resemble feature vectors. For this we'll employ `tf.train.Features`.
+3. Construct `Example` protos by passing `tf.train.Features` groups to `tf.train.Example`.
+4. Stack multiple `Example` protos into an ELWC.
+
+Recall that one of the reasons we're using ELWCs is because they will allow us to represent sequences as individual feature values. SVMlight forced us to store feature values in the format `j: x`. Well `tf.train.Feature` allows us to represent feature values more in the format `j: [x0, x1, ..., xn]`, which will be useful for learning to rank from product descriptions and product ratings. Scalar values will be represented in the format `j: [x]`.
+
+There are three Tensorflow `Feature` types:
+
+|       Original feature value type        | TF data type |  `tfr_helpers` function |                            applies to                      |
+| ---------------------------------------- | ------------ | ----------------------- | ---------------------------------------------------------- |
+|       `int`, `bool`, `int32`, `int64`    |  Int64List   |   `_int64_feature`      |  integer-valued, boolean, or ordinally-encoded ML features |
+|        `float`, `double`                 |  FloatList   |   `_float_feature`      |              continuously-valued ML features               |
+|               `str`, `bytes`             |  BytesList   |   `_bytes_feature`      |          categorical features, word token sequences        |
+
+[TensorFlow documentation](https://www.tensorflow.org/tutorials/load_data/tfrecord) on `tf.train.Feature` is better than most. If you look closely, you'll notice that `tf.train.Feature` objects are actually... wait for it... protos! 
+
+```python
+def _float_feature(x):
+    if not isinstance(x, list):
+        x = list(x)
+
+    return tf.train.Feature(float_list=tf.train.FloatList(value=x))
+
+y = _float_feature(0.78)
+type(y)
+```
+
+```bash
+<class 'tensorflow.core.example.feature_pb2.Feature'>
+```
+
+`pb2` is short for "protocol buffer syntax 2".
+
+Now we can group together named example and context `Feature` values together so that they resemble proper feature vectors, like what we're used to with pandas and sklearn. Suppose we have two example features, `x1: 0.52` and `x2: -1.34` and no context features. Then our query group would be represented with the following single feature vector:
+
+```python
+feature_dict = {'x1': _float_feature(0.52), 'x2': _float_feature(-1.34)}
+tf.train.Feature(feature=feature_dict) # great argument name, right?
+```
+
+```bash
+feature {
+  key: "x1"
+  value {
+    float_list {
+      value: 0.5199999809265137
+    }
+  }
+}
+feature {
+  key: "x2"
+  value {
+    float_list {
+      value: -1.340000033378601
+    }
+  }
+}
+```
+
+Note: many functions and methods TensorFlow do not accept positional arguments, so a good rule of thumb is to write your TFR code in the style `function(arg=value)`. This is why the `feature` argument is named explicitly in the code above.
+
+
+### Putting it all together in Python
+
+Now that we understand all of the components required to represent a query group in proto format, lets build an ELWC in python. There are several ways to do it!
+
+First, let's suppose we have an ecommerce query group. The customer's query was "german sports coupe" and the result set included three pages for different types of cars. After engineering some features such as item average clickthrough rate and count of recent clicks (Avatria's ecommerce LTR product uses these features and many more), here is our data laid out in a text file (scroll horizontally to see all feature values):
+
+
+| TARGET  | QID | ITEM_AVG_CTR  | ITEM_AVG_CONV | RECENT_CLICKS  | AVG_PRICE  |             ITEM_TOKENS        | RESULTS     |      QUERY_TERMS       | QUERY_NEW | QUERY_TOKENS |
+| ------- | --- | ------------- | ------------- | -------------- | ---------- | ------------------------------ | ----------- | ---------------------- | --------- | ----------------------------- |
+|   2     | 0   |  1.67         |    2.21       |  0.51          |  -0.86     |  ['BMW', 'M3', 'v8', 'coupe']  |  3          |            3           | 1         | ['german', 'sports', 'coupe'] |
+|   0     | 0   |  0.29         |    -1.82      |  -0.12          |  -0.89    |       ['MB', 'C300', 'coupe'   |  3          |            3           | 1         | ['german', 'sports', 'coupe'] |
+|   1     | 0   |  0.23         |    0.98       |  0.44          |  0.34      |     ['Porsche', 'Cayman']      |  3          |            3           | 1         | ['german', 'sports', 'coupe'] |
+
+First we need to cast each of the three individual search result `examples` into named TensorFlow `Feature` protos. For example, the first search result we'll encode so that it looks like this:
+
+<img src="assets/car_example_protos.jpg"
+     alt="car example protos" />
+
+
+#### Building an ELWC the tricky way
+
+
+#### Building an ELWC the direct way
 
 
 
-### Tensorflow `features`
 
 
-### ELWCs
+
 
 
 

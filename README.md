@@ -16,7 +16,7 @@ There are two main components of this repo: a set of tutorials and guides that e
 4. Performance hacks.
 
 ## Other TFR resources
-Here are some links to learning resources that we found helpful for figuring out to use TensorFlow Ranking
+Here are some links to learning resources that we found helpful for getting TensorFlow Ranking up and running.
 
 - TensorFlow Ranking [Colab notebook](https://colab.research.google.com/github/tensorflow/ranking/blob/master/tensorflow_ranking/examples/handling_sparse_features.ipynb) tutorial
 - [Example LTR implementation](https://quantdare.com/learning-to-rank-with-tensorflow/) using the deprecated `tfr.data.libsvm_generator` data processor method.
@@ -24,6 +24,7 @@ Here are some links to learning resources that we found helpful for figuring out
 - [Master's thesis](https://prof.beuth-hochschule.de/fileadmin/prof/aloeser/shuaib_thesis.pdf) on learning to rank with TFR example
 - [SVMLight documentation](http://svmlight.joachims.org/), a popular LTR data format
 - Crucial [TFR GitHub issue](https://github.com/tensorflow/ranking/issues/196) on converting Python data structures to ELWCs.
+- [Strong Medium introduction](https://medium.com/mostly-ai/tensorflow-records-what-they-are-and-how-to-use-them-c46bc4bbb564) to building TFrecords files.
 - [Groupwise Scoring Functions paper](https://arxiv.org/abs/1811.04415) describes the core implementation TFR models.
 
 
