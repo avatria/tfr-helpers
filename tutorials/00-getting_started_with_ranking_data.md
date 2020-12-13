@@ -150,20 +150,20 @@ message ExampleListWithContext {
 }
 ```
 
-We'll get into what exactly the `Features` data type is in the next section of this guide, but for now, just think of it as a group of machine learning features. So each query group will be saved as one ELWC. Each ELWC contains one query `context` Example proto where query-level features can be stored exactly once, and then any number of `example` Example protos are be stored within a list, each `example` proto containing individual item-level features. 
+We'll get into what exactly the `Features` data type is in the next section of this guide, but for now, just think of it as a group of machine learning features. So each query group will be saved as one ELWC. Each ELWC contains one query `context` Example proto along with any number of `examples` Example protos. The `context` proto contains query-level feature values while the `examples` protos each contain the features for individual query results.
 
-Don't be confused between the `Example` proto and the `example` representing an individual item within the query group. The terminology is indeed confusing! But the [basic outline](https://github.com/tensorflow/serving/issues/1628) of one query group formatted as an ELWC is decently straightforward:
+Don't be confused between the `Example` proto and the `example` representing an individual item within the query group. The terminology is indeed confusing! But the [basic outline](https://github.com/tensorflow/serving/issues/1628) of one query group formatted as an ELWC is decently straightforward when expressed as JSON:
 
 ```bash
-// one ELWC
+// ELWC as JSON
 {
-  // context features
+  // One Example for context
   "context": {
     "<feature_name3>": <value>|<list>
     "<feature_name4>": <value>|<list>
   },
 
-  // List of Example objects
+  // List of Examples for individual query results
   "examples": [
     {
       // Example 1
@@ -205,20 +205,20 @@ There are three Tensorflow `Feature` types:
 
 |       Original feature value type        | TF data type |  `tfr_helpers` function |                            applies to                      |
 | ---------------------------------------- | ------------ | ----------------------- | ---------------------------------------------------------- |
-|       `int`, `bool`, `int32`, `int64`    |  Int64List   |   `_int64_feature`      |  integer-valued, boolean, or ordinally-encoded ML features |
-|        `float`, `double`                 |  FloatList   |   `_float_feature`      |              continuously-valued ML features               |
-|               `str`, `bytes`             |  BytesList   |   `_bytes_feature`      |          categorical features, word token sequences        |
+|       `int`, `bool`, `int32`, `int64`    |  Int64List   |   `int64_feature`      |  integer-valued, boolean, or ordinally-encoded ML features |
+|        `float`, `double`                 |  FloatList   |   `float_feature`      |              continuously-valued ML features               |
+|               `str`, `bytes`             |  BytesList   |   `bytes_feature`      |          categorical features, word token sequences        |
 
 [TensorFlow documentation](https://www.tensorflow.org/tutorials/load_data/tfrecord) on `tf.train.Feature` is better than most. If you look closely, you'll notice that `tf.train.Feature` objects are actually... wait for it... protos! 
 
 ```python
-def _float_feature(x):
+def float_feature(x):
     if not isinstance(x, list):
         x = list(x)
 
     return tf.train.Feature(float_list=tf.train.FloatList(value=x))
 
-y = _float_feature(0.78)
+y = float_feature(0.78)
 type(y)
 ```
 
@@ -228,7 +228,27 @@ type(y)
 
 `pb2` is short for "protocol buffer syntax 2".
 
-Now we can group together named example and context `Feature` values together so that they resemble proper feature vectors, like what we're used to with pandas and sklearn. Suppose we have two example features, `x1: 0.52` and `x2: -1.34` and no context features. Then our query group would be represented with the following single feature vector:
+Now we can group together named `Feature` values together so that they resemble proper feature vectors, like what we're used to with pandas and sklearn. That is, a `tf.train.Feature` proto is a collection of named feature values. [Here](https://github.com/tensorflow/tensorflow/blob/v2.3.1/tensorflow/core/example/feature.proto#L78) are the formal proto definitions each of `Feature` and `Features`:
+
+```bash
+// storage for individual feature values
+message Feature {
+  // Each feature can be exactly one kind.
+  oneof kind {
+    BytesList bytes_list = 1;
+    FloatList float_list = 2;
+    Int64List int64_list = 3;
+  }
+}
+
+// storage for groups of named Feature(s)
+message Features {
+  // Map from feature name to feature.
+  map<string, Feature> feature = 1;
+}
+```
+
+Suppose we have two example features, `x1: 0.52` and `x2: -1.34` and no context features. Then our query group would be represented with the following single feature vector:
 
 ```python
 feature_dict = {'x1': _float_feature(0.52), 'x2': _float_feature(-1.34)}
@@ -261,7 +281,7 @@ Note: many functions and methods TensorFlow do not accept positional arguments, 
 
 Now that we understand all of the components required to represent a query group in proto format, lets build an ELWC in python. There are several ways to do it!
 
-First, let's suppose we have an ecommerce query group. The customer's query was "german sports coupe" and the result set included three pages for different types of cars. After engineering some features such as item average clickthrough rate and count of recent clicks (Avatria's ecommerce LTR product uses these features and many more), here is our data laid out in a text file (scroll horizontally to see all feature values):
+First, let's suppose we have an ecommerce query group. Suppose we have data from a car auction website, and a customer's query was "german sports coupe." The result set included three listings for different cars. After engineering some features such as each car's historical average clickthrough rate and count of recent clicks (Avatria's ecommerce LTR product uses these features and many more), we could write the data to a text file (scroll horizontally to see all feature values):
 
 
 | TARGET  | QID | ITEM_AVG_CTR  | ITEM_AVG_CONV | RECENT_CLICKS  | AVG_PRICE  |             ITEM_TOKENS        | RESULTS     |      QUERY_TERMS       | QUERY_NEW | QUERY_TOKENS |
@@ -276,17 +296,269 @@ First we need to cast each of the three individual search result `examples` into
      alt="car example protos" />
 
 
-#### Building an ELWC the tricky way
+#### Building ELWCs in Python
+
+Going back to the four steps involved in building an ELWC, build one in Python using our "german sports coupe" query data.
+
+```python
+from tensorflow_serving.apis import input_pb2
+import tensorflow as tf
+import tensorflow_helpers as tfrh
+
+context_feature_dict = {'qid': tfrh.int64_feature([0])
+						, 'query_tokens': tfrh.bytes_feature(['german', 'sports', 'coupe'])
+						, 'query_new': tfrh.int64_feature([1])
+						, 'query_terms': tfrh.int64_feature([3])
+						, 'results': tfrh.int64_feature([3])}
+
+example_feature_dicts = list()
+example_feature_dicts.append({'item_tokens': tfrh.bytes_feature(['BMW', 'M3', 'v8', 'coupe'])
+							  , 'item_avg_ctr': tfrh.float_feature([1.67])
+							  , 'item_avg_conv': tfrh.float_feature([2.21])
+							  , 'recent_clicks': tfrh.float_feature([0.51])
+							  , 'avg_price': tfrh.float_feature([-0.86])})
+example_feature_dicts.append({'item_tokens': tfrh.bytes_feature(['MB', 'C300', 'coupe'])
+							  , 'item_avg_ctr': tfrh.float_feature([0.29])
+							  , 'item_avg_conv': tfrh.float_feature([-1.82])
+							  , 'recent_clicks': tfrh.float_feature([-0.12])
+							  , 'avg_price': tfrh.float_feature([-0.89])})
+example_feature_dicts.append({'item_tokens': tfrh.bytes_feature(['Porsche Cayman'])
+							  , 'item_avg_ctr': tfrh.float_feature([0.23])
+							  , 'item_avg_conv': tfrh.float_feature([0.98])
+							  , 'recent_clicks': tfrh.float_feature([0.44])
+							  , 'avg_price': tfrh.float_feature([0.34])})
+
+# -- initialize ELWC proto. It comes with "context" Example proto attribute and 
+# -- "examples" list-of-Examples attribute.
+ELWC = input_pb2.ExampleListWithContext()
+
+# -- convert context feature dict into context proto.
+context_proto = tf.train.Example(features=tf.train.Features(feature=context_dict))
+
+# -- modify the ELWC in-place by copying the context proto.
+ELWC.context.CopyFrom(context_proto)
+
+# -- now add examples to ELWC.
+for example_feature_dict in example_feature_dicts:
+	# -- each time you call ELWC.examples.add() it creates a new blank 'examples' entry in the ELWC.
+	elwc_example_proto = ELWC.examples.add()
+	
+	# -- cast dict of named result Features to proto.
+	example_proto = tf.train.Example(features=tf.train.Features(feature=example_feature_dict))
+	
+	# -- modify the ELWC in-place by copying the contents of the current example proto.
+	elwc_example_proto.CopyFrom(example_proto)
 
 
-#### Building an ELWC the direct way
+print(ELWC)
+```
+
+```
+examples {
+  features {
+    feature {
+      key: "avg_price"
+      value {
+        float_list {
+          value: -0.8600000143051147
+        }
+      }
+    }
+    feature {
+      key: "item_avg_conv"
+      value {
+        float_list {
+          value: 2.2100000381469727
+        }
+      }
+    }
+    feature {
+      key: "item_avg_ctr"
+      value {
+        float_list {
+          value: 1.6699999570846558
+        }
+      }
+    }
+    feature {
+      key: "item_tokens"
+      value {
+        bytes_list {
+          value: "BMW"
+          value: "M3"
+          value: "v8"
+          value: "coupe"
+        }
+      }
+    }
+    feature {
+      key: "recent_clicks"
+      value {
+        float_list {
+          value: 0.5099999904632568
+        }
+      }
+    }
+  }
+}
+examples {
+  features {
+    feature {
+      key: "avg_price"
+      value {
+        float_list {
+          value: -0.8899999856948853
+        }
+      }
+    }
+    feature {
+      key: "item_avg_conv"
+      value {
+        float_list {
+          value: -1.8200000524520874
+        }
+      }
+    }
+    feature {
+      key: "item_avg_ctr"
+      value {
+        float_list {
+          value: 0.28999999165534973
+        }
+      }
+    }
+    feature {
+      key: "item_tokens"
+      value {
+        bytes_list {
+          value: "MB"
+          value: "C300"
+          value: "coupe"
+        }
+      }
+    }
+    feature {
+      key: "recent_clicks"
+      value {
+        float_list {
+          value: -0.11999999731779099
+        }
+      }
+    }
+  }
+}
+examples {
+  features {
+    feature {
+      key: "avg_price"
+      value {
+        float_list {
+          value: 0.3400000035762787
+        }
+      }
+    }
+    feature {
+      key: "item_avg_conv"
+      value {
+        float_list {
+          value: 0.9800000190734863
+        }
+      }
+    }
+    feature {
+      key: "item_avg_ctr"
+      value {
+        float_list {
+          value: 0.23000000417232513
+        }
+      }
+    }
+    feature {
+      key: "item_tokens"
+      value {
+        bytes_list {
+          value: "Porsche Cayman"
+        }
+      }
+    }
+    feature {
+      key: "recent_clicks"
+      value {
+        float_list {
+          value: 0.4399999976158142
+        }
+      }
+    }
+  }
+}
+context {
+  features {
+    feature {
+      key: "qid"
+      value {
+        int64_list {
+          value: 0
+        }
+      }
+    }
+    feature {
+      key: "query_new"
+      value {
+        int64_list {
+          value: 1
+        }
+      }
+    }
+    feature {
+      key: "query_terms"
+      value {
+        int64_list {
+          value: 3
+        }
+      }
+    }
+    feature {
+      key: "query_tokens"
+      value {
+        bytes_list {
+          value: "german"
+          value: "sports"
+          value: "coupe"
+        }
+      }
+    }
+    feature {
+      key: "results"
+      value {
+        int64_list {
+          value: 3
+        }
+      }
+    }
+  }
+}
+```
+
+As promised, we have exactly one `context` proto and multiple per-car protos each stored under the  `examples` pro. An important aspect of ELWCs is that the items within the list are 
 
 
+Constructing ELWCs like this is very strange because of all of the in-place manipulation of the `ELWC` object through linked objects like `elwc_example_proto`. You may be thinking, "If I've gone through all of this work to create a context proto and a list of example protos, why all of this confusing overhead to pass my protos into the actual `ELWC` container?" You can skip the confusing `CopyFrom` logic by constructing `ELWC`s using constructor arguments:
 
+```python
+ELWC = input_pb2.ExampleListWithContext(context=context_proto
+									    , examples=example_feature_dicts)
 
+```
 
+Finally, we'll write each ELWC to TF Records files so that they can be consumed by a TensorFlow Ranking estimator for model training/validation and testing. Note: since the ELWC is a serialized data format, we have to cast this serialized representation to a string (text) when writing it to `.tfrecords` files.
 
+```python
+train_file = 'trainset.tfrecords'
+with tf.io.TFRecordWriter(trainfile) as writer:
+	writer.write(ELWC.SerializeToString())
+```
 
+Now we have to scale this logic to hundreds of thousands of query groups. This is what `tfr_helpers` is for - point the `converters` module at your data source (either a .tsv file, LibSVM file, or pandas.DataFrame) to create an ELWC generator. Then iterate over the generator and write all output ELWCs to a `.tfrecords` file for use as training data.
 
 
 
